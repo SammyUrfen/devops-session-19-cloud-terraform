@@ -3,9 +3,18 @@
 Bibek Jyoti Charah — 24bcs10112 (GitHub: SammyUrfen)
 
 Environment: Fedora 44, Terraform v1.16.1, AWS provider v6.67.0, random provider v3.9.1. No Kubernetes cluster is used.
-There are **no AWS credentials on this machine yet**, so only the commands that do not call AWS ran
-(`version`, `init`, `fmt`, `validate`, `graph`). Their output is pasted as printed; long output is cut with `...`.
-`plan`, `apply`, `state list` and `destroy` are marked **Pending** below with the exact commands to run.
+AWS CLI v2 with an IAM user, region `ap-south-1`. Every command ran for real, including `plan`, `apply` and `destroy`.
+All output is pasted as printed. Long output is cut with `...`. The 12-digit AWS account ID is replaced with
+`<ACCOUNT_ID>` and my public IP with `<MY_IP>`.
+
+| Task | Status |
+|---|---|
+| Terraform project (providers, variables, resources, outputs, dependencies) | Done |
+| AWS resources created with `apply` and checked with curl and the AWS CLI | Done |
+| Architecture diagram | Done (Mermaid) |
+| `plan`, `apply`, `state list`, `output`, `destroy` | Done, output below |
+| Screenshots | Terminal output pasted instead |
+| All resources destroyed | Done, checked below |
 
 ## Architecture
 
@@ -141,23 +150,215 @@ digraph G {
 Read an edge `A -> B` as "A depends on B". The edge `aws_instance.web -> aws_route_table_association.public`
 is the explicit `depends_on`; the others come from references.
 
-## Pending: run after AWS credentials are configured
-
-These commands call AWS. They have **not** run yet; no output is shown on purpose.
+## Commands against AWS
 
 ```
-terraform plan -out=tfplan
-terraform apply tfplan
-terraform output
-terraform state list
-curl $(terraform output -raw web_url)
-terraform destroy
+$ aws sts get-caller-identity --query Arn --output text
+arn:aws:iam::<ACCOUNT_ID>:user/SammyUrfen-CLI
 ```
 
-Expected: `plan` shows 10 resources to add (VPC, subnet, IGW, route table, association, security group, instance,
-random_id, bucket, public access block). `state list` shows those plus `data.aws_ami.al2023`.
+### terraform plan
 
-## How to run once AWS is ready
+```
+$ terraform plan -out=tfplan
+data.aws_ami.al2023: Reading...
+data.aws_ami.al2023: Read complete after 0s [id=ami-03054015e26069645]
+
+Terraform used the selected providers to generate the following execution
+plan. Resource actions are indicated with the following symbols:
+  + create
+
+Terraform will perform the following actions:
+
+  # aws_instance.web will be created
+  + resource "aws_instance" "web" {
+      + ami                                  = "ami-03054015e26069645"
+...
+      + instance_type                        = "t3.micro"
+...
+  # aws_security_group.web will be created
+  + resource "aws_security_group" "web" {
+      + arn                    = (known after apply)
+      + description            = "HTTP from anywhere, SSH only from ssh_allowed_cidr"
+...
+          + {
+              + cidr_blocks      = [
+                  + "<MY_IP>/32",
+                ]
+              + description      = "SSH from one trusted CIDR"
+              + from_port        = 22
+...
+Plan: 10 to add, 0 to change, 0 to destroy.
+
+Changes to Outputs:
+  + ami_id             = "ami-03054015e26069645"
+  + instance_public_ip = (known after apply)
+  + public_subnet_id   = (known after apply)
+  + s3_bucket_name     = (known after apply)
+  + security_group_id  = (known after apply)
+  + vpc_id             = (known after apply)
+  + web_url            = (known after apply)
+...
+```
+
+The 10 resources: VPC, subnet, internet gateway, route table, route table association, security group, EC2
+instance, `random_id`, S3 bucket, S3 public access block. The AMI lookup is a data source, so it is not counted.
+
+### terraform apply
+
+```
+$ terraform apply -auto-approve tfplan
+random_id.bucket_suffix: Creating...
+random_id.bucket_suffix: Creation complete after 0s [id=H-fpPQ]
+aws_vpc.main: Creating...
+aws_s3_bucket.artifacts: Creating...
+aws_vpc.main: Creation complete after 2s [id=vpc-0a3a4fdbcb83515a8]
+aws_internet_gateway.main: Creating...
+aws_subnet.public: Creating...
+aws_security_group.web: Creating...
+aws_s3_bucket.artifacts: Creation complete after 3s [id=session19-artifacts-1fe7e93d]
+aws_s3_bucket_public_access_block.artifacts: Creating...
+aws_s3_bucket_public_access_block.artifacts: Creation complete after 0s [id=session19-artifacts-1fe7e93d]
+aws_internet_gateway.main: Creation complete after 2s [id=igw-02732e8b8b34ea4ba]
+aws_route_table.public: Creating...
+aws_route_table.public: Creation complete after 0s [id=rtb-0af451252a7a723aa]
+aws_security_group.web: Creation complete after 3s [id=sg-0da37e1d3e743e83f]
+aws_subnet.public: Still creating... [00m10s elapsed]
+aws_subnet.public: Creation complete after 12s [id=subnet-091150b6037330a0c]
+aws_route_table_association.public: Creating...
+aws_route_table_association.public: Creation complete after 0s [id=rtbassoc-036ff6a8eb945c6a3]
+aws_instance.web: Creating...
+aws_instance.web: Still creating... [00m10s elapsed]
+aws_instance.web: Creation complete after 13s [id=i-0c17cbcf5986274c2]
+
+Apply complete! Resources: 10 added, 0 changed, 0 destroyed.
+
+Outputs:
+
+ami_id = "ami-03054015e26069645"
+instance_public_ip = "65.2.124.100"
+public_subnet_id = "subnet-091150b6037330a0c"
+s3_bucket_name = "session19-artifacts-1fe7e93d"
+security_group_id = "sg-0da37e1d3e743e83f"
+vpc_id = "vpc-0a3a4fdbcb83515a8"
+web_url = "http://ec2-65-2-124-100.ap-south-1.compute.amazonaws.com"
+```
+
+The order shows the dependency graph at work. The instance started only after the route table association
+was complete (the explicit `depends_on`). The S3 bucket has no link to the network, so it was created in parallel.
+The `Outputs:` block is the same as the output of `terraform output`.
+
+### terraform state list
+
+```
+$ terraform state list
+data.aws_ami.al2023
+aws_instance.web
+aws_internet_gateway.main
+aws_route_table.public
+aws_route_table_association.public
+aws_s3_bucket.artifacts
+aws_s3_bucket_public_access_block.artifacts
+aws_security_group.web
+aws_subnet.public
+aws_vpc.main
+random_id.bucket_suffix
+```
+
+### Hello page and AWS proof
+
+The page answered on the 4th try (about 30 s after apply, while `user_data` installed nginx).
+
+```
+$ curl -s -i http://65.2.124.100 | head -3
+HTTP/1.1 200 OK
+Server: nginx/1.30.5
+Date: Wed, 07 Oct 2026 17:20:57 GMT
+$ curl -s http://65.2.124.100
+<h1>Hello from session19 (Terraform, Session 19)</h1>
+```
+
+```
+$ aws ec2 describe-instances --instance-ids i-0c17cbcf5986274c2 --query 'Reservations[].Instances[].[InstanceId,InstanceType,State.Name,PublicIpAddress,ImageId]' --output table
+-----------------------------------------------------------------------------------------
+|                                   DescribeInstances                                   |
++----------------------+-----------+----------+---------------+-------------------------+
+|  i-0c17cbcf5986274c2 |  t3.micro |  running |  65.2.124.100 |  ami-03054015e26069645  |
++----------------------+-----------+----------+---------------+-------------------------+
+$ aws s3 ls | grep session19
+2026-10-07 22:49:56 session19-artifacts-1fe7e93d
+```
+
+### terraform destroy
+
+```
+$ terraform destroy -auto-approve
+random_id.bucket_suffix: Refreshing state... [id=H-fpPQ]
+data.aws_ami.al2023: Reading...
+aws_vpc.main: Refreshing state... [id=vpc-0a3a4fdbcb83515a8]
+aws_s3_bucket.artifacts: Refreshing state... [id=session19-artifacts-1fe7e93d]
+data.aws_ami.al2023: Read complete after 2s [id=ami-03054015e26069645]
+...
+Plan: 0 to add, 0 to change, 10 to destroy.
+...
+aws_s3_bucket_public_access_block.artifacts: Destroying... [id=session19-artifacts-1fe7e93d]
+aws_instance.web: Destroying... [id=i-0c17cbcf5986274c2]
+aws_s3_bucket_public_access_block.artifacts: Destruction complete after 1s
+aws_s3_bucket.artifacts: Destroying... [id=session19-artifacts-1fe7e93d]
+aws_s3_bucket.artifacts: Destruction complete after 1s
+random_id.bucket_suffix: Destroying... [id=H-fpPQ]
+random_id.bucket_suffix: Destruction complete after 0s
+aws_instance.web: Destruction complete after 31s
+aws_route_table_association.public: Destroying... [id=rtbassoc-036ff6a8eb945c6a3]
+aws_security_group.web: Destroying... [id=sg-0da37e1d3e743e83f]
+aws_route_table_association.public: Destruction complete after 0s
+aws_subnet.public: Destroying... [id=subnet-091150b6037330a0c]
+aws_route_table.public: Destroying... [id=rtb-0af451252a7a723aa]
+aws_route_table.public: Destruction complete after 1s
+aws_internet_gateway.main: Destroying... [id=igw-02732e8b8b34ea4ba]
+aws_security_group.web: Destruction complete after 1s
+aws_subnet.public: Destruction complete after 1s
+aws_internet_gateway.main: Destruction complete after 0s
+aws_vpc.main: Destroying... [id=vpc-0a3a4fdbcb83515a8]
+aws_vpc.main: Destruction complete after 1s
+
+Destroy complete! Resources: 10 destroyed.
+```
+
+Destroy ran in reverse order: the instance went first, and the VPC went last.
+
+### Nothing is left
+
+```
+$ terraform state list | wc -l
+0
+$ aws ec2 describe-instances --instance-ids i-0c17cbcf5986274c2 --query 'Reservations[].Instances[].State.Name' --output text
+terminated
+$ aws ec2 describe-vpcs --filters Name=tag:Project,Values=session19 --query 'Vpcs[].VpcId' --output text
+$ aws s3 ls | grep -c session19
+0
+```
+
+A terminated instance stays visible for about an hour and costs nothing. No session19 VPC or bucket is left.
+
+## Findings
+
+The first `terraform plan` failed. The IAM user had no EC2 read permission:
+
+```
+$ terraform plan -out=tfplan
+...
+Plan: 9 to add, 0 to change, 0 to destroy.
+Error: reading EC2 AMIs: operation error EC2: DescribeImages, https response error StatusCode: 403, RequestID: 44003b04-6e51-4473-95ea-4e9e1125ddfb, api error UnauthorizedOperation: You are not authorized to perform this operation. User: arn:aws:iam::<ACCOUNT_ID>:user/SammyUrfen-CLI is not authorized to perform: ec2:DescribeImages because no identity-based policy allows the ec2:DescribeImages action
+```
+
+Cause: the `aws_ami` data source calls `ec2:DescribeImages`, and the user had no policy that allows it.
+The plan counted 9 resources because the instance needs the AMI ID. Nothing was created, because only `plan` ran.
+Fix: attach `AmazonEC2FullAccess` and `AmazonS3FullAccess` to the IAM user. The next `plan` showed 10 resources.
+
+Another small finding: `terraform version` warns that 1.16.1 is out of date (1.16.5 is the latest). It does not affect this project.
+
+## How to run it again
 
 1. Install the AWS CLI and run `aws configure` (access key of an IAM user, region `ap-south-1`). Check with `aws sts get-caller-identity`.
 2. `cp terraform.tfvars.example terraform.tfvars` and set `ssh_allowed_cidr` to your IP: `echo "$(curl -s https://checkip.amazonaws.com)/32"`.
@@ -166,4 +367,3 @@ random_id, bucket, public access block). `state list` shows those plus `data.aws
 4. Wait 1–2 minutes for `user_data`, then open the `web_url` output. It should show "Hello from session19".
 5. `terraform state list` to see what Terraform tracks.
 6. **`terraform destroy`** and type `yes`. Check the EC2 console shows the instance as terminated.
-7. Paste each output into the Pending section above.
